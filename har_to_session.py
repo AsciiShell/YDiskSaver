@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert a Chrome HAR to a local cookie session without printing secrets."""
+"""Convert Chrome HAR or exported cookies JSON to a private local session."""
 
 import argparse
 import json
@@ -9,7 +9,7 @@ import sys
 import tempfile
 from urllib.parse import urlsplit
 
-from ydisk_auth import DEFAULT_STATE
+from ydisk_auth import DEFAULT_STATE, normalize_cookies
 
 
 def parse_cookie_header(value: str):
@@ -69,18 +69,19 @@ def write_private_json(path: Path, value: dict) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("har", type=Path, help="HAR из Chrome с конфиденциальными данными")
+    parser.add_argument("har", type=Path, help="HAR из Chrome или JSON из Get cookies.txt LOCALLY")
     parser.add_argument("session", type=Path, nargs="?", default=DEFAULT_STATE)
     args = parser.parse_args()
     source = args.har.expanduser().resolve()
     target = args.session.expanduser().resolve()
     if source == target:
-        parser.error("HAR и файл сессии должны различаться")
+        parser.error("Исходный файл и файл сессии должны различаться")
     try:
-        document = json.loads(source.read_text(encoding="utf-8"))
-        state = convert_har(document)
-        if not state["cookies"]:
-            raise ValueError("В HAR нет cookies запросов к disk.yandex.ru")
+        document = json.loads(source.read_text(encoding="utf-8-sig"))
+        if isinstance(document, dict) and "log" in document:
+            state = normalize_cookies(convert_har(document))
+        else:
+            state = normalize_cookies(document)
         write_private_json(target, state)
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"Не удалось создать сессию: {type(error).__name__}", file=sys.stderr)

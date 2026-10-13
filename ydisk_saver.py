@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Copy a private Yandex Disk folder through the web UI's models-v2 API.
+"""Copy private Yandex Disk files or folders through the web UI's models-v2 API.
 
 The browser is not started. A previously saved local session JSON file
 supplies cookies. Existing local files are skipped without requesting a download URL.
@@ -20,7 +20,7 @@ import sys
 import time
 import traceback
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 from ydisk_auth import DEFAULT_STATE, ScriptParser, cookie_jar, find_config
@@ -39,20 +39,31 @@ IMAGE_EXTENSIONS = {
 
 
 def normalize_remote(value: str) -> str:
-    """Accept a Disk path, disk: path, or the private web UI folder URL."""
+    """Accept private Disk paths and URLs, including a selected idDialog resource."""
     if value.startswith("https://"):
         parsed = urlsplit(value)
-        if parsed.hostname != "disk.yandex.ru" or parsed.query or parsed.fragment:
-            raise ValueError("Ожидается адрес папки disk.yandex.ru/client/disk/...")
-        if not (parsed.path == "/client/disk" or parsed.path.startswith("/client/disk/")):
-            raise ValueError("Ожидается адрес папки disk.yandex.ru/client/disk/...")
-        value = unquote(parsed.path.removeprefix("/client"))
+        if (parsed.hostname != "disk.yandex.ru" or parsed.fragment
+                or parsed.username or parsed.password or parsed.port not in (None, 443)):
+            raise ValueError("Ожидается адрес личного Диска disk.yandex.ru/client/...")
+        if not (parsed.path == "/client" or parsed.path.startswith("/client/")):
+            raise ValueError("Ожидается адрес личного Диска disk.yandex.ru/client/...")
+        selected = parse_qs(parsed.query, keep_blank_values=True).get("idDialog")
+        if selected is not None:
+            if len(selected) != 1 or not selected[0]:
+                raise ValueError("Некорректный параметр idDialog")
+            value = selected[0]
+        else:
+            value = unquote(parsed.path.removeprefix("/client"))
+            if value == "/photo":
+                value = "/photounlim"
     elif value.startswith("disk:"):
         value = "/disk" + value.removeprefix("disk:")
     value = value.rstrip("/")
-    if value != "/disk" and not value.startswith("/disk/"):
-        raise ValueError("Путь должен иметь вид /disk/папка")
-    if any(part in ("", ".", "..") for part in value.split("/")[2:]):
+    if not any(value == root or value.startswith(root + "/")
+               for root in ("/disk", "/photounlim")):
+        raise ValueError("Путь должен иметь вид /disk/папка или /photounlim/файл")
+    if ("\\" in value or "\0" in value
+            or any(part in ("", ".", "..") for part in value.split("/")[2:])):
         raise ValueError("Некорректный путь на Диске")
     return value
 
@@ -134,15 +145,12 @@ def print_missing_session(path: Path) -> None:
     instructions = [
         f"Не найден файл сессии Яндекс Диска: {path}",
         "Как его создать:",
-        "  1. Войдите в Яндекс Диск в Chrome и откройте DevTools → Network.",
-        "  2. Перейдите в папку Диска и выберите «Copy all listed as HAR (with sensitive data)».",
-        "  3. Сохраните скопированный HAR в файл, затем выполните:",
+        "  1. Войдите в Яндекс Диск в Chrome.",
+        "  2. В Get cookies.txt LOCALLY выберите формат JSON и экспортируйте cookies этой страницы.",
+        f"  3. Сохраните экспорт как {path} или передайте его через --state.",
+        "  HAR также поддерживается: python3 har_to_session.py /путь/к/ydisk-session.har",
+        "Подробности: README.md, раздел «Как получить данные для входа».",
     ]
-    if path == DEFAULT_STATE.expanduser():
-        instructions.append('     python3 har_to_session.py "$HOME/Downloads/ydisk-session.har"')
-    else:
-        instructions.append('     python3 har_to_session.py "$HOME/Downloads/ydisk-session.har" "' + str(path) + '"')
-    instructions.append("Подробности: README.md, раздел «Как получить данные для входа».")
     log_message("\n".join(instructions), error=True)
 
 
@@ -152,7 +160,8 @@ class DiskWeb:
         self.timeout = timeout
         self.debug = debug
         self.opener = build_opener(HTTPCookieProcessor(cookie_jar(state)))
-        self.page = "https://disk.yandex.ru/client" + quote(remote, safe="/")
+        page_path = "/disk" if remote.startswith("/photounlim") else remote
+        self.page = "https://disk.yandex.ru/client" + quote(page_path, safe="/")
         self.headers = {
             "User-Agent": "Mozilla/5.0",
             "Referer": self.page,
@@ -249,6 +258,18 @@ class DiskWeb:
                 break
             offset += 40
 
+    def get_resource(self, path: str) -> dict:
+        result = self.call("mpfs/resources", {
+            "idContext": path, "withParent": "1", "with_share": "1",
+            "amount": 1, "offset": 0, "sort": "name", "order": "1",
+        })
+        resources = result.get("resources")
+        if isinstance(resources, list):
+            for item in resources:
+                if isinstance(item, dict) and item.get("path") == path:
+                    return item
+        raise RuntimeError("В ответе mpfs/resources нет запрошенного ресурса")
+
     def download_url(self, path: str) -> str:
         result = self.call("mpfs/url", {"path": path})
         url = result.get("file")
@@ -275,6 +296,13 @@ def copy_tree(client: DiskWeb, remote: str, local: Path, root: Path,
         print_debug_error(error, f"список {remote}", debug)
         return
 
+    copy_items(client, children, remote, local, root, retries, file_timeout,
+               preview_timeout, counts, debug)
+
+
+def copy_items(client: DiskWeb, children, remote: str, local: Path, root: Path,
+               retries: int, file_timeout: float, preview_timeout: float,
+               counts: Counter, debug: bool = False) -> None:
     for item in children:
         try:
             name = safe_name(item.get("name"))
@@ -353,14 +381,34 @@ def copy_tree(client: DiskWeb, remote: str, local: Path, root: Path,
             print_debug_error(error, f"элемент папки {remote}", debug)
 
 
+def copy_remote(client: DiskWeb, remote: str, local: Path, root: Path,
+                retries: int, file_timeout: float, preview_timeout: float,
+                counts: Counter, debug: bool = False) -> None:
+    # Namespace roots are folders; other resources may be either files or folders.
+    if remote in ("/disk", "/photounlim"):
+        kind = "dir"
+    else:
+        item = client.get_resource(remote)
+        kind = item.get("type")
+    if kind == "dir":
+        copy_tree(client, remote, local, root, retries, file_timeout,
+                  preview_timeout, counts, debug)
+    elif kind == "file":
+        copy_items(client, [item], remote, local, root, retries, file_timeout,
+                   preview_timeout, counts, debug)
+    else:
+        raise ValueError("Неизвестный тип ресурса")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__,
         epilog="Пример: python3 ydisk_saver.py /disk/crons ~/tmp/disk",
     )
-    parser.add_argument("remote_path", help="Папка на Диске, например /disk/crons")
-    parser.add_argument("local_dir", type=Path, help="Локальная папка для её содержимого")
-    parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
+    parser.add_argument("remote_path", help="Папка, файл или URL Диска с idDialog")
+    parser.add_argument("local_dir", type=Path, help="Локальная папка назначения")
+    parser.add_argument("--state", type=Path, default=DEFAULT_STATE,
+                        help="Сессия или экспорт cookies JSON (по умолчанию ./session.json)")
     parser.add_argument("--request-timeout", type=float, default=8.0)
     parser.add_argument("--file-timeout", type=float, default=30.0)
     parser.add_argument("--preview-timeout", type=float, default=10.0)
@@ -382,7 +430,7 @@ def main() -> int:
         client = DiskWeb(state_path, remote, args.request_timeout, args.debug)
         root = prepare_root(args.local_dir)
         counts = Counter()
-        copy_tree(client, remote, root, root, args.retries, args.file_timeout,
+        copy_remote(client, remote, root, root, args.retries, args.file_timeout,
                   args.preview_timeout, counts, args.debug)
     except (HTTPError, URLError, OSError, ValueError, RuntimeError) as error:
         log_message(f"Не удалось начать копирование: {error_label(error)}", error=True)
