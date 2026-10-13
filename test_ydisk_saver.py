@@ -17,7 +17,7 @@ from ydisk_auth import DEFAULT_STATE, cookie_jar, normalize_cookies
 from ydisk_saver import DiskWeb, copy_remote, normalize_remote
 
 
-PHOTO = '/photounlim/2026-10-10 19-28-15.JPG'
+PHOTO = '/photounlim/2000-01-01 12-00-00.JPG'
 COOKIE = {'name': 'test', 'value': 'fake', 'domain': '.yandex.ru',
           'path': '/', 'secure': True, 'expirationDate': 4102444800.5,
           'hostOnly': False, 'httpOnly': True, 'session': False}
@@ -104,8 +104,14 @@ class AuthTests(unittest.TestCase):
 class PathTests(unittest.TestCase):
     def test_selected_photo_url(self):
         url = ('https://disk.yandex.ru/client/photo?view=icons'
-               '&idDialog=%2Fphotounlim%2F2026-10-10%2019-28-15.JPG')
+               '&idDialog=%2Fphotounlim%2F2000-01-01%2012-00-00.JPG')
         self.assertEqual(normalize_remote(url), PHOTO)
+
+    def test_selected_disk_photo_with_spaces_and_tags(self):
+        url = ('https://disk.yandex.ru/client/disk?idDialog=%2Fdisk%2FПримеры'
+               '%2FАльбом%20%23Метка%2Ftest-image.jpg')
+        self.assertEqual(normalize_remote(url),
+                         '/disk/Примеры/Альбом #Метка/test-image.jpg')
 
     def test_paths_and_folders(self):
         cases = {'/disk/Фото/': '/disk/Фото', 'disk:/Фото': '/disk/Фото',
@@ -142,7 +148,7 @@ class FakeDisk:
     def __init__(self, fail_original=False):
         self.fail_original = fail_original
         self.downloads = []
-        self.file = {'path': PHOTO, 'name': '2026-10-10 19-28-15.JPG', 'type': 'file',
+        self.file = {'path': PHOTO, 'name': '2000-01-01 12-00-00.JPG', 'type': 'file',
                      'meta': {'size': 4, 'sizes': [
                          {'name': 'XXXL', 'url': 'https://downloader.disk.yandex.ru/preview'}]}}
 
@@ -189,7 +195,7 @@ class DownloadTests(unittest.TestCase):
             counts = self.copy(FakeDisk(fail_original=True), PHOTO, root)
             self.assertEqual(counts['errors'], 1)
             self.assertEqual(counts['previewed'], 1)
-            self.assertEqual((root / 'preview-2026-10-10 19-28-15.jpg').read_bytes(), b'jpeg')
+            self.assertEqual((root / 'preview-2000-01-01 12-00-00.jpg').read_bytes(), b'jpeg')
 
     def test_folder_recursion(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -199,15 +205,33 @@ class DownloadTests(unittest.TestCase):
             self.assertEqual(counts['directories'], 1)
             self.assertEqual((root / 'nested' / client.file['name']).read_bytes(), b'jpeg')
 
-    def test_metadata_selects_exact_resource(self):
+    def test_metadata_selects_exact_resource_from_parent(self):
         client = object.__new__(DiskWeb)
         with patch.object(client, 'call', return_value={'resources': [
             {'path': '/disk/other', 'type': 'file'}, FakeDisk().file,
         ]}) as call:
             self.assertEqual(client.get_resource(PHOTO)['path'], PHOTO)
-            self.assertEqual(call.call_args.args[1]['idContext'], PHOTO)
+            self.assertEqual(call.call_args.args[1]['idContext'], '/photounlim')
         with patch.object(client, 'call', return_value={'resources': []}), self.assertRaises(RuntimeError):
             client.get_resource(PHOTO)
+
+    def test_metadata_searches_later_pages(self):
+        client = object.__new__(DiskWeb)
+        client.debug = False
+        first_page = [{'path': f'/photounlim/{index}.JPG', 'type': 'file'}
+                      for index in range(40)]
+        with patch.object(client, 'call', side_effect=[
+            {'resources': first_page}, {'resources': [FakeDisk().file]},
+        ]) as call:
+            self.assertEqual(client.get_resource(PHOTO)['path'], PHOTO)
+            self.assertEqual([args.args[1]['offset'] for args in call.call_args_list], [0, 40])
+
+    def test_directory_metadata_is_also_found_in_parent(self):
+        client = object.__new__(DiskWeb)
+        item = {'path': '/disk/folder', 'name': 'folder', 'type': 'dir'}
+        with patch.object(client, 'call', return_value={'resources': [item]}) as call:
+            self.assertEqual(client.get_resource('/disk/folder'), item)
+            self.assertEqual(call.call_args.args[1]['idContext'], '/disk')
 
 
 if __name__ == '__main__':

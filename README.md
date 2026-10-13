@@ -86,13 +86,13 @@ python3 ydisk_saver.py '/disk/Фото/2020' "$HOME/tmp/disk"
 Поддерживаются также пути `/photounlim` (фото безлимитной автозагрузки) и ссылки с параметром `idDialog`. Этот параметр выбирает конкретный ресурс и имеет приоритет над папкой в адресе. В примере ниже это отдельный файл, а не директория:
 
 ```bash
-python3 ydisk_saver.py '/photounlim/2026-10-10 19-28-15.JPG' './saved'
+python3 ydisk_saver.py '/photounlim/2000-01-01 12-00-00.JPG' './saved'
 ```
 
 Эквивалентный запуск с адресом браузера:
 
 ```bash
-python3 ydisk_saver.py 'https://disk.yandex.ru/client/photo?view=icons&idDialog=%2Fphotounlim%2F2026-10-10%2019-28-15.JPG' './saved'
+python3 ydisk_saver.py 'https://disk.yandex.ru/client/photo?view=icons&idDialog=%2Fphotounlim%2F2000-01-01%2012-00-00.JPG' './saved'
 ```
 
 Для копирования всех фото из этого пространства передайте `/photounlim` или `https://disk.yandex.ru/client/photo`. Адрес с `&idDialog=...` передавайте целиком и в кавычках. Программа определяет тип выбранного ресурса по метаданным веб-API; для файла сохраняется и резервное скачивание превью.

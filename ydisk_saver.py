@@ -259,16 +259,13 @@ class DiskWeb:
             offset += 40
 
     def get_resource(self, path: str) -> dict:
-        result = self.call("mpfs/resources", {
-            "idContext": path, "withParent": "1", "with_share": "1",
-            "amount": 1, "offset": 0, "sort": "name", "order": "1",
-        })
-        resources = result.get("resources")
-        if isinstance(resources, list):
-            for item in resources:
-                if isinstance(item, dict) and item.get("path") == path:
-                    return item
-        raise RuntimeError("В ответе mpfs/resources нет запрошенного ресурса")
+        # resources lists directory contents. A file used as idContext need
+        # not appear in the response, even with withParent enabled.
+        parent = path.rsplit("/", 1)[0]
+        for item in self.list_children(parent):
+            if item.get("path") == path:
+                return item
+        raise RuntimeError("Запрошенный ресурс не найден в родительской папке")
 
     def download_url(self, path: str) -> str:
         result = self.call("mpfs/url", {"path": path})
